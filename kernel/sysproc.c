@@ -5,6 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -101,5 +102,27 @@ sys_trace(void)
     return -1;
   }
   myproc()->tracemask = mask;
+  return 0;
+}
+
+// get system info and return by using page table
+uint64
+sys_sysinfo(void)
+{
+  struct sysinfo info;
+  struct proc *p = myproc();
+  uint64 addr;
+
+  // Get address of sysinfo pointer from user space
+  argaddr(0, &addr);
+
+  // Call update informations into struct info
+  info.freemem = get_kfreemem();
+  info.nproc = nproc();
+  
+  // Copy struct info into page table
+  if(copyout(p->pagetable, addr, (char*)&info, sizeof(info)) < 0){
+    return -1;
+  }
   return 0;
 }
