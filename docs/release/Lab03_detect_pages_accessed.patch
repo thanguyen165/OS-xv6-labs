@@ -1,0 +1,51 @@
+diff --git a/kernel/riscv.h b/kernel/riscv.h
+index 6cfff1e..c7edecd 100644
+--- a/kernel/riscv.h
++++ b/kernel/riscv.h
+@@ -375,6 +375,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
+ #define PTE_W (1L << 2)
+ #define PTE_X (1L << 3)
+ #define PTE_U (1L << 4) // user can access
++#define PTE_A (1L << 6)
+ 
+ 
+ 
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index d9b7f9c..ae85dab 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -123,3 +123,34 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++
++#ifdef LAB_PGTBL
++int
++sys_pgaccess(void)
++{
++  struct proc *p = myproc();
++  unsigned int abits=0;
++  uint64 addr;
++  argaddr(0, &addr);
++  int num;
++  argint(1,&num);
++
++  uint64 dest;
++  argaddr(2, &dest);
++  for(int i=0;i<num;i++){
++    uint64 query_addr = addr + i * PGSIZE;
++    pte_t * pte = walk(p->pagetable, query_addr, 0);
++    if(*pte&PTE_A){
++      abits =abits | (1<<i);
++      *pte=(*pte)&(~PTE_A);
++    }
++  }
++
++  if(copyout(p->pagetable,dest,(char*)&abits, sizeof(abits)) < 0){
++    return -1;
++  }
++
++  return 0;
++}
++#endif
