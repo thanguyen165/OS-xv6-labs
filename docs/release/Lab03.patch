@@ -1,0 +1,350 @@
+diff --git a/docs/release/Lab03_detect_pages_accessed.patch b/docs/release/Lab03_detect_pages_accessed.patch
+new file mode 100644
+index 0000000..149ffb4
+--- /dev/null
++++ b/docs/release/Lab03_detect_pages_accessed.patch
+@@ -0,0 +1,51 @@
++diff --git a/kernel/riscv.h b/kernel/riscv.h
++index 6cfff1e..c7edecd 100644
++--- a/kernel/riscv.h
+++++ b/kernel/riscv.h
++@@ -375,6 +375,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
++ #define PTE_W (1L << 2)
++ #define PTE_X (1L << 3)
++ #define PTE_U (1L << 4) // user can access
+++#define PTE_A (1L << 6)
++ 
++ 
++ 
++diff --git a/kernel/sysproc.c b/kernel/sysproc.c
++index d9b7f9c..ae85dab 100644
++--- a/kernel/sysproc.c
+++++ b/kernel/sysproc.c
++@@ -123,3 +123,34 @@ sys_uptime(void)
++   release(&tickslock);
++   return xticks;
++ }
+++
+++
+++#ifdef LAB_PGTBL
+++int
+++sys_pgaccess(void)
+++{
+++  struct proc *p = myproc();
+++  unsigned int abits=0;
+++  uint64 addr;
+++  argaddr(0, &addr);
+++  int num;
+++  argint(1,&num);
+++
+++  uint64 dest;
+++  argaddr(2, &dest);
+++  for(int i=0;i<num;i++){
+++    uint64 query_addr = addr + i * PGSIZE;
+++    pte_t * pte = walk(p->pagetable, query_addr, 0);
+++    if(*pte&PTE_A){
+++      abits =abits | (1<<i);
+++      *pte=(*pte)&(~PTE_A);
+++    }
+++  }
+++
+++  if(copyout(p->pagetable,dest,(char*)&abits, sizeof(abits)) < 0){
+++    return -1;
+++  }
+++
+++  return 0;
+++}
+++#endif
+diff --git a/docs/release/Lab03_print_pagetable.patch b/docs/release/Lab03_print_pagetable.patch
+new file mode 100644
+index 0000000..f9ce942
+--- /dev/null
++++ b/docs/release/Lab03_print_pagetable.patch
+@@ -0,0 +1,54 @@
++diff --git a/kernel/exec.c b/kernel/exec.c
++index 6d7c452..85eb327 100644
++--- a/kernel/exec.c
+++++ b/kernel/exec.c
++@@ -128,6 +128,9 @@ exec(char *path, char **argv)
++   p->trapframe->sp = sp; // initial stack pointer
++   proc_freepagetable(oldpagetable, oldsz);
++ 
+++  if(p->pid == 1)
+++    vmprint(p->pagetable);
+++
++   return argc; // this ends up in a0, the first argument to main(argc, argv)
++ 
++  bad:
++diff --git a/kernel/vm.c b/kernel/vm.c
++index 7f388fe..6498ebd 100644
++--- a/kernel/vm.c
+++++ b/kernel/vm.c
++@@ -488,9 +488,35 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
++ 
++ 
++ #ifdef LAB_PGTBL
+++void
+++print_pgtbl(pagetable_t pagetable, int depth)
+++{
+++  // there are 2^9 = 512 PTEs in a page table.
+++  for(int i=0; i < 512; i++){
+++    pte_t pte = pagetable[i];
+++    if (pte & PTE_V){
+++      printf("..");
+++      for(int j=0; j<depth; j++){
+++        printf(" .."); // print the depth of the page table
+++      }
+++
+++      // must casting to void*, else warning from compiler
+++      printf("%d: pte %p pa %p\n", i, (void*)pte, (void*)PTE2PA(pte));
+++
+++      // check if the PTE is a page table
+++      if((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+++        uint64 child = PTE2PA(pte); // get the physical address of the child page table
+++        print_pgtbl((pagetable_t)child, depth+1); // recursively print the child page table
+++      }
+++    }
+++  }
+++}
+++
++ void
++ vmprint(pagetable_t pagetable) {
++   // your code here
+++  printf("page table %p\n", pagetable);
+++  print_pgtbl(pagetable, 0);
++ }
++ #endif
++ 
+diff --git a/docs/release/Lab03_speedup_syscall.patch b/docs/release/Lab03_speedup_syscall.patch
+new file mode 100644
+index 0000000..4637b7b
+--- /dev/null
++++ b/docs/release/Lab03_speedup_syscall.patch
+@@ -0,0 +1,61 @@
++diff --git a/kernel/proc.c b/kernel/proc.c
++index 130d9ce..49bcf87 100644
++--- a/kernel/proc.c
+++++ b/kernel/proc.c
++@@ -132,6 +132,13 @@ found:
++     return 0;
++   }
++ 
+++  if((p->usyscallpage = (struct usyscall*)kalloc()) == 0){
+++    freeproc(p);
+++    release(&p->lock);
+++    return 0;
+++  }
+++  p->usyscallpage->pid = p->pid;
+++
++   // An empty user page table.
++   p->pagetable = proc_pagetable(p);
++   if(p->pagetable == 0){
++@@ -158,6 +165,11 @@ freeproc(struct proc *p)
++   if(p->trapframe)
++     kfree((void*)p->trapframe);
++   p->trapframe = 0;
+++
+++  if(p->usyscallpage)
+++    kfree((void*)p->usyscallpage);
+++  p->usyscallpage = 0;
+++
++   if(p->pagetable)
++     proc_freepagetable(p->pagetable, p->sz);
++   p->pagetable = 0;
++@@ -183,6 +195,12 @@ proc_pagetable(struct proc *p)
++   if(pagetable == 0)
++     return 0;
++ 
+++  if(mappages(pagetable, USYSCALL, PGSIZE,
+++             (uint64)(p->usyscallpage), PTE_U | PTE_R) < 0){
+++    uvmfree(pagetable, 0);
+++    return 0;
+++  }
+++
++   // map the trampoline code (for system call return)
++   // at the highest user virtual address.
++   // only the supervisor uses it, on the way
++@@ -210,6 +228,7 @@ proc_pagetable(struct proc *p)
++ void
++ proc_freepagetable(pagetable_t pagetable, uint64 sz)
++ {
+++  uvmunmap(pagetable, USYSCALL, 1, 0);
++   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
++   uvmunmap(pagetable, TRAPFRAME, 1, 0);
++   uvmfree(pagetable, sz);
++diff --git a/kernel/proc.h b/kernel/proc.h
++index d021857..473eacb 100644
++--- a/kernel/proc.h
+++++ b/kernel/proc.h
++@@ -104,4 +104,5 @@ struct proc {
++   struct file *ofile[NOFILE];  // Open files
++   struct inode *cwd;           // Current directory
++   char name[16];               // Process name (debugging)
+++  struct usyscall* usyscallpage;
++ };
+diff --git a/kernel/exec.c b/kernel/exec.c
+index 6d7c452..85eb327 100644
+--- a/kernel/exec.c
++++ b/kernel/exec.c
+@@ -128,6 +128,9 @@ exec(char *path, char **argv)
+   p->trapframe->sp = sp; // initial stack pointer
+   proc_freepagetable(oldpagetable, oldsz);
+ 
++  if(p->pid == 1)
++    vmprint(p->pagetable);
++
+   return argc; // this ends up in a0, the first argument to main(argc, argv)
+ 
+  bad:
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 130d9ce..49bcf87 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -132,6 +132,13 @@ found:
+     return 0;
+   }
+ 
++  if((p->usyscallpage = (struct usyscall*)kalloc()) == 0){
++    freeproc(p);
++    release(&p->lock);
++    return 0;
++  }
++  p->usyscallpage->pid = p->pid;
++
+   // An empty user page table.
+   p->pagetable = proc_pagetable(p);
+   if(p->pagetable == 0){
+@@ -158,6 +165,11 @@ freeproc(struct proc *p)
+   if(p->trapframe)
+     kfree((void*)p->trapframe);
+   p->trapframe = 0;
++
++  if(p->usyscallpage)
++    kfree((void*)p->usyscallpage);
++  p->usyscallpage = 0;
++
+   if(p->pagetable)
+     proc_freepagetable(p->pagetable, p->sz);
+   p->pagetable = 0;
+@@ -183,6 +195,12 @@ proc_pagetable(struct proc *p)
+   if(pagetable == 0)
+     return 0;
+ 
++  if(mappages(pagetable, USYSCALL, PGSIZE,
++             (uint64)(p->usyscallpage), PTE_U | PTE_R) < 0){
++    uvmfree(pagetable, 0);
++    return 0;
++  }
++
+   // map the trampoline code (for system call return)
+   // at the highest user virtual address.
+   // only the supervisor uses it, on the way
+@@ -210,6 +228,7 @@ proc_pagetable(struct proc *p)
+ void
+ proc_freepagetable(pagetable_t pagetable, uint64 sz)
+ {
++  uvmunmap(pagetable, USYSCALL, 1, 0);
+   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+   uvmfree(pagetable, sz);
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..473eacb 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,5 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  struct usyscall* usyscallpage;
+ };
+diff --git a/kernel/riscv.h b/kernel/riscv.h
+index 6cfff1e..c7edecd 100644
+--- a/kernel/riscv.h
++++ b/kernel/riscv.h
+@@ -375,6 +375,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
+ #define PTE_W (1L << 2)
+ #define PTE_X (1L << 3)
+ #define PTE_U (1L << 4) // user can access
++#define PTE_A (1L << 6)
+ 
+ 
+ 
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index d9b7f9c..ae85dab 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -123,3 +123,34 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++
++#ifdef LAB_PGTBL
++int
++sys_pgaccess(void)
++{
++  struct proc *p = myproc();
++  unsigned int abits=0;
++  uint64 addr;
++  argaddr(0, &addr);
++  int num;
++  argint(1,&num);
++
++  uint64 dest;
++  argaddr(2, &dest);
++  for(int i=0;i<num;i++){
++    uint64 query_addr = addr + i * PGSIZE;
++    pte_t * pte = walk(p->pagetable, query_addr, 0);
++    if(*pte&PTE_A){
++      abits =abits | (1<<i);
++      *pte=(*pte)&(~PTE_A);
++    }
++  }
++
++  if(copyout(p->pagetable,dest,(char*)&abits, sizeof(abits)) < 0){
++    return -1;
++  }
++
++  return 0;
++}
++#endif
+diff --git a/kernel/vm.c b/kernel/vm.c
+index 7f388fe..6498ebd 100644
+--- a/kernel/vm.c
++++ b/kernel/vm.c
+@@ -488,9 +488,35 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
+ 
+ 
+ #ifdef LAB_PGTBL
++void
++print_pgtbl(pagetable_t pagetable, int depth)
++{
++  // there are 2^9 = 512 PTEs in a page table.
++  for(int i=0; i < 512; i++){
++    pte_t pte = pagetable[i];
++    if (pte & PTE_V){
++      printf("..");
++      for(int j=0; j<depth; j++){
++        printf(" .."); // print the depth of the page table
++      }
++
++      // must casting to void*, else warning from compiler
++      printf("%d: pte %p pa %p\n", i, (void*)pte, (void*)PTE2PA(pte));
++
++      // check if the PTE is a page table
++      if((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
++        uint64 child = PTE2PA(pte); // get the physical address of the child page table
++        print_pgtbl((pagetable_t)child, depth+1); // recursively print the child page table
++      }
++    }
++  }
++}
++
+ void
+ vmprint(pagetable_t pagetable) {
+   // your code here
++  printf("page table %p\n", pagetable);
++  print_pgtbl(pagetable, 0);
+ }
+ #endif
+ 
