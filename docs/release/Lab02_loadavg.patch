@@ -1,0 +1,106 @@
+diff --git a/kernel/defs.h b/kernel/defs.h
+index c9d230f..a711312 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -9,6 +9,7 @@ struct sleeplock;
+ struct stat;
+ struct superblock;
+ struct sysinfo;
++extern uint64 current_loadavg;
+ 
+ // bio.c
+ void            binit(void);
+@@ -109,6 +110,8 @@ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
+ void            procdump(void);
+ int             nproc(void);
++uint64          loadavg(void);
++void            update_loadavg(void);
+ 
+ // swtch.S
+ void            swtch(struct context*, struct context*);
+diff --git a/kernel/proc.c b/kernel/proc.c
+index e47d736..fcd748b 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -713,3 +713,43 @@ nproc(void)
+   }
+   return count;
+ }
++
++// count the number of processes whose state is RUNNABLE or RUNNING
++int
++nrun(void)
++{
++  struct proc *p;
++  int count = 0;
++  for(p = proc; p < &proc[NPROC]; p++){
++    acquire(&p->lock);
++    if(p->state == RUNNABLE || p->state == RUNNING){
++      count++;
++    }
++    release(&p->lock);
++  }
++  return count;
++}
++
++// global variable to handle load average. Update realtime.
++uint64 current_loadavg = 0;
++
++/**
++ * @brief Updates the system load average.
++ *
++ * This function calculates the system load average using an exponential moving average
++ * with a smoothing factor (alpha) of 0.8.
++ * The load average is scaled by 1000 for precision.
++ */
++void
++update_loadavg(void)
++{
++  uint64 n = nrun();
++  current_loadavg = (current_loadavg * 8 + n * 1000) / 10;
++}
++
++// Return the current load average
++uint64
++loadavg(void)
++{
++  return current_loadavg;
++}
+diff --git a/kernel/sysinfo.h b/kernel/sysinfo.h
+index fb878e6..bc2dd31 100644
+--- a/kernel/sysinfo.h
++++ b/kernel/sysinfo.h
+@@ -1,4 +1,5 @@
+ struct sysinfo {
+   uint64 freemem;   // amount of free memory (bytes)
+   uint64 nproc;     // number of process
++  uint64 loadavg;   // load average
+ };
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index a2a7b8a..97cad2e 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -119,6 +119,7 @@ sys_sysinfo(void)
+   // Call update informations into struct info
+   info.freemem = get_kfreemem();
+   info.nproc = nproc();
++  info.loadavg = loadavg();
+   
+   // Copy struct info into page table
+   if(copyout(p->pagetable, addr, (char*)&info, sizeof(info)) < 0){
+diff --git a/kernel/trap.c b/kernel/trap.c
+index d454a7d..61d32a7 100644
+--- a/kernel/trap.c
++++ b/kernel/trap.c
+@@ -166,6 +166,10 @@ clockintr()
+   if(cpuid() == 0){
+     acquire(&tickslock);
+     ticks++;
++    if(ticks % 10 == 0){
++      update_loadavg();
++    }
++
+     wakeup(&ticks);
+     release(&tickslock);
+   }

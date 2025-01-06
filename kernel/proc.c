@@ -713,3 +713,43 @@ nproc(void)
   }
   return count;
 }
+
+// count the number of processes whose state is RUNNABLE or RUNNING
+int
+nrun(void)
+{
+  struct proc *p;
+  int count = 0;
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state == RUNNABLE || p->state == RUNNING){
+      count++;
+    }
+    release(&p->lock);
+  }
+  return count;
+}
+
+// global variable to handle load average. Update realtime.
+uint64 current_loadavg = 0;
+
+/**
+ * @brief Updates the system load average.
+ *
+ * This function calculates the system load average using an exponential moving average
+ * with a smoothing factor (alpha) of 0.8.
+ * The load average is scaled by 1000 for precision.
+ */
+void
+update_loadavg(void)
+{
+  uint64 n = nrun();
+  current_loadavg = (current_loadavg * 8 + n * 1000) / 10;
+}
+
+// Return the current load average
+uint64
+loadavg(void)
+{
+  return current_loadavg;
+}

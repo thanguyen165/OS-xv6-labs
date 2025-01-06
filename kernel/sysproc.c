@@ -119,6 +119,7 @@ sys_sysinfo(void)
   // Call update informations into struct info
   info.freemem = get_kfreemem();
   info.nproc = nproc();
+  info.loadavg = loadavg();
   
   // Copy struct info into page table
   if(copyout(p->pagetable, addr, (char*)&info, sizeof(info)) < 0){
