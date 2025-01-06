@@ -489,8 +489,34 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 
 #ifdef LAB_PGTBL
 void
+print_pgtbl(pagetable_t pagetable, int depth)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i=0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V){
+      printf("..");
+      for(int j=0; j<depth; j++){
+        printf(" .."); // print the depth of the page table
+      }
+
+      // must casting to void*, else warning from compiler
+      printf("%d: pte %p pa %p\n", i, (void*)pte, (void*)PTE2PA(pte));
+
+      // check if the PTE is a page table
+      if((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        uint64 child = PTE2PA(pte); // get the physical address of the child page table
+        print_pgtbl((pagetable_t)child, depth+1); // recursively print the child page table
+      }
+    }
+  }
+}
+
+void
 vmprint(pagetable_t pagetable) {
   // your code here
+  printf("page table %p\n", pagetable);
+  print_pgtbl(pagetable, 0);
 }
 #endif
 
